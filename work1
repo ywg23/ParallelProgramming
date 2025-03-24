@@ -1,0 +1,70 @@
+#include <iostream>
+#include <windows.h>
+#include <stdlib.h>
+using namespace std;
+const int N = 1000;
+int count = 500;
+double b[N][N], a[N],sum[N];
+void init()
+{
+    for(int i = 0; i < N; i++)
+    {
+        for(int j = 0; j < N; j++)
+        {
+            b[i][j] = i + j;
+            a[j] = j;
+        }
+    }
+}
+int main()
+{
+    long long head, tail, freq; // timers
+    double total_time = 0.0;
+    init();
+    /*平凡算法
+        QueryPerformanceFrequency((LARGE_INTEGER*)&freq);
+        //start time
+        QueryPerformanceCounter((LARGE_INTEGER*)&head);
+
+        for(int i = 0; i<N; i++)
+        {
+            sum[i] = 0.0;
+            for(int j = 0; j < N; j++)
+            {
+                sum[i] += a[i] * b[j][i];
+            }
+        }
+
+        //end time
+        QueryPerformanceCounter((LARGE_INTEGER*)&tail);
+        total_time += (tail - head) * 1000.0 / freq;
+
+    */
+
+    //cache优化算法
+            QueryPerformanceFrequency((LARGE_INTEGER*)&freq);
+            //start time
+            QueryPerformanceCounter((LARGE_INTEGER*)&head);
+
+            for(int i = 0; i<N; i++)
+            {
+                sum[i] = 0.0;
+            }
+
+            for(int k = 0;k<N;k++)
+            {
+                for(int i = 0;i<N;i++)
+                {
+                    sum[i] += b[k][i]*a[k];
+                }
+            }
+            //end time
+            QueryPerformanceCounter((LARGE_INTEGER*)&tail);
+            total_time += (tail - head) * 1000.0 / freq;
+    cout <<"N:"<<N<<endl;
+    cout <<"Count:" << count << endl;
+    cout << "Total Time: " << total_time <<"ms" << endl;
+    cout << total_time / count;
+
+    return 0;
+}

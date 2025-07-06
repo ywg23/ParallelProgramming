@@ -2,137 +2,131 @@
 #include <iostream>
 #include <fstream>
 #include <iomanip>
-#include <time.h>
-#include <sys/time.h>
 #include <cmath>
 #include <string.h>
 #include <omp.h>
 
 using namespace std;
 
-#define ele_t float
-#define ZERO (float)1e-5
+#define ElementType float
+#define NEAR_ZERO 1e-5f
 
-#ifndef N
-#define N 2048
+#ifndef MATRIX_SIZE
+#define MATRIX_SIZE 2048
 #endif
 
-#ifndef DATA_PATH
-#define DATA_PATH "/home/suhipek/NKU_parallel_programming/gauss.dat"
+#ifndef DATA_FILE
+#define DATA_FILE "/home/suhipek/NKU_parallel_programming/gauss.dat"
 #endif
 
-// #define DEBUG
+int total_ranks, current_rank;
 
-int world_size, world_rank;
+void masterProcess(ElementType *matrix_data) {
+    ElementType(*matrix)[MATRIX_SIZE] = (ElementType(*)[MATRIX_SIZE])matrix_data;
+    
+    for (int pivot = 0; pivot < MATRIX_SIZE; pivot++) {
+        int segment_size = (MATRIX_SIZE - pivot - 1 + total_ranks - 1) / total_ranks;
+        segment_size = (segment_size > 1) ? segment_size : 0; // Skip if only one row per segment
 
-void run_master(ele_t *_mat)
-{
-    ele_t(*mat)[N] = (ele_t(*)[N])_mat;
-    cout << endl;
-    for (int i = 0; i < N; i++)
-    {
-        int n_lines = (N - i - 1) / world_size + 1;
-        n_lines = n_lines == 1 ? 0 : n_lines;
-        // MPI_Bcast(&i, 1, MPI_INT, 0, MPI_COMM_WORLD);
-        if (n_lines)
-        {
-            MPI_Bcast(mat[i], sizeof(ele_t) * N, MPI_BYTE, 0, MPI_COMM_WORLD);
-            for (int th = 1; th < world_size; th++)
-            {
-                MPI_Send(mat[i + 1 + (th - 1) * n_lines], sizeof(ele_t) * N * n_lines, MPI_BYTE, th, 0, MPI_COMM_WORLD);
+        // Broadcast pivot row to all workers
+        if (segment_size) {
+            MPI_Bcast(matrix[pivot], MATRIX_SIZE * sizeof(ElementType), MPI_BYTE, 0, MPI_COMM_WORLD);
+            
+            // Distribute row segments to workers
+            for (int worker = 1; worker < total_ranks; worker++) {
+                int start_row = pivot + 1 + (worker - 1) * segment_size;
+                if (start_row < MATRIX_SIZE) {
+                    MPI_Send(matrix[start_row], segment_size * MATRIX_SIZE * sizeof(ElementType),
+                             MPI_BYTE, worker, 0, MPI_COMM_WORLD);
+                }
             }
         }
 
-#pragma omp parallel for num_threads(4)
-        for (int j = i + 1 + (world_size - 1) * n_lines; j < N; j++)
-        {
-            if (abs(mat[i][i]) < ZERO)
-                continue;
-            ele_t div = mat[j][i] / mat[i][i];
-#pragma omp simd
-            for (int k = i; k < N; k++)
-                mat[j][k] -= mat[i][k] * div;
+        // Process local rows (remaining after distribution)
+        int local_start = pivot + 1 + (total_ranks - 1) * segment_size;
+        #pragma omp parallel for num_threads(4)
+        for (int row = local_start; row < MATRIX_SIZE; row++) {
+            if (fabs(matrix[pivot][pivot]) < NEAR_ZERO) continue;
+            
+            ElementType factor = matrix[row][pivot] / matrix[pivot][pivot];
+            #pragma omp simd
+            for (int col = pivot; col < MATRIX_SIZE; col++) {
+                matrix[row][col] -= matrix[pivot][col] * factor;
+            }
         }
 
-        if (n_lines)
-        {
-            for (int th = 1; th < world_size; th++)
-            {
-                MPI_Recv(mat[i + 1 + (th - 1) * n_lines], sizeof(ele_t) * N * n_lines, MPI_BYTE, th, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        // Collect processed segments from workers
+        if (segment_size) {
+            for (int worker = 1; worker < total_ranks; worker++) {
+                int start_row = pivot + 1 + (worker - 1) * segment_size;
+                if (start_row < MATRIX_SIZE) {
+                    MPI_Recv(matrix[start_row], segment_size * MATRIX_SIZE * sizeof(ElementType),
+                             MPI_BYTE, worker, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                }
             }
         }
     }
-
-#ifdef DEBUG
-    for (int i = 0; i < N; i++)
-    {
-        for (int j = 0; j < N; j++)
-            cout << mat[i][j] << ' ';
-        cout << endl;
-    }
-    cout << endl;
-#endif
 }
 
-void run_slave()
-{
-    // int i;      // 枢轴位置
-    int n_lines;      // 需要消元的行数
-    ele_t lines_i[N]; // 当前消元行
+void workerProcess() {
+    ElementType pivot_row[MATRIX_SIZE]; // Stores broadcasted pivot row
 
-    for (int i = 0; i < N; i++)
-    {
-        n_lines = (N - i - 1) / world_size + 1;
-        if (n_lines == 1)
-            break;
-        MPI_Bcast(lines_i, sizeof(ele_t) * N, MPI_BYTE, 0, MPI_COMM_WORLD);
-        // printf("%d: pivot: %d, lines: %d\n", world_rank, i, n_lines);
-        ele_t(*mat)[N] = (ele_t(*)[N])malloc(n_lines * N * sizeof(ele_t));
-        MPI_Recv(mat, n_lines * N * sizeof(ele_t), MPI_BYTE, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-#pragma omp parallel for num_threads(4)
-        for (int j = 0; j < n_lines; j++)
-        {
-            if (abs(lines_i[i]) < ZERO) // 枢轴为0，不需要消元
-                continue;
-            ele_t div = mat[j][i] / lines_i[i];
-#pragma omp simd
-            for (int k = i; k < N; k++)
-                mat[j][k] -= lines_i[k] * div;
+    for (int pivot = 0; pivot < MATRIX_SIZE; pivot++) {
+        int segment_size = (MATRIX_SIZE - pivot - 1 + total_ranks - 1) / total_ranks;
+        if (segment_size <= 1) break; // No work for workers
+
+        // Receive pivot row from master
+        MPI_Bcast(pivot_row, MATRIX_SIZE * sizeof(ElementType), MPI_BYTE, 0, MPI_COMM_WORLD);
+        
+        // Calculate assigned row segment
+        int start_index = pivot + 1 + (current_rank - 1) * segment_size;
+        int actual_lines = min(segment_size, MATRIX_SIZE - start_index);
+        if (actual_lines <= 0) continue;
+
+        // Receive and process assigned rows
+        ElementType *local_rows = new ElementType[actual_lines * MATRIX_SIZE];
+        MPI_Recv(local_rows, actual_lines * MATRIX_SIZE * sizeof(ElementType),
+                 MPI_BYTE, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+        #pragma omp parallel for num_threads(4)
+        for (int i = 0; i < actual_lines; i++) {
+            if (fabs(pivot_row[pivot]) < NEAR_ZERO) continue;
+            
+            ElementType factor = local_rows[i * MATRIX_SIZE + pivot] / pivot_row[pivot];
+            #pragma omp simd
+            for (int col = pivot; col < MATRIX_SIZE; col++) {
+                local_rows[i * MATRIX_SIZE + col] -= pivot_row[col] * factor;
+            }
         }
-        MPI_Send(mat, n_lines * N * sizeof(ele_t), MPI_BYTE, 0, 1, MPI_COMM_WORLD);
-        free(mat);
+
+        // Send processed rows back to master
+        MPI_Send(local_rows, actual_lines * MATRIX_SIZE * sizeof(ElementType),
+                 MPI_BYTE, 0, 1, MPI_COMM_WORLD);
+        delete[] local_rows;
     }
 }
 
-int main()
-{
-    MPI_Init(NULL, NULL);
+int main(int argc, char **argv) {
+    MPI_Init(&argc, &argv);
+    MPI_Comm_size(MPI_COMM_WORLD, &total_ranks);
+    MPI_Comm_rank(MPI_COMM_WORLD, &current_rank);
 
-    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
-    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+    if (current_rank == 0) {
+        ElementType *matrix = new ElementType[MATRIX_SIZE * MATRIX_SIZE];
+        ifstream data_file(DATA_FILE, ios::binary);
+        data_file.read((char *)matrix, MATRIX_SIZE * MATRIX_SIZE * sizeof(ElementType));
+        data_file.close();
 
-    if (world_rank == 0)
-    {
-        ele_t *_mat = new ele_t[N * N];
-        // ele_t(*mat)[N] = (ele_t(*)[N])_mat;
-        ifstream data((string)DATA_PATH, ios::in | ios::binary);
-        data.read((char *)_mat, N * N * sizeof(ele_t));
-        data.close();
+        double start_time = MPI_Wtime();
+        masterProcess(matrix);
+        double elapsed = MPI_Wtime() - start_time;
+        cout << fixed << setprecision(4) << elapsed * 1000 << " ms" << endl;
 
-        timespec start, end;
-        double time_used = 0;
-        clock_gettime(CLOCK_REALTIME, &start);
-        run_master(_mat);
-        clock_gettime(CLOCK_REALTIME, &end);
-        time_used += (end.tv_sec - start.tv_sec) * 1000;
-        time_used += double(end.tv_nsec - start.tv_nsec) / 1000000;
-        cout << time_used << endl;
-        delete[] _mat;
-    }
-    else
-    {
-        run_slave();
+        delete[] matrix;
+    } else {
+        workerProcess();
     }
 
     MPI_Finalize();
+    return 0;
 }
